@@ -85,6 +85,9 @@ export { Select };
 import SelectOption from "../src/select-option/examples.data";
 export { SelectOption };
 
+import Slider from "../src/slider/examples.data";
+export { Slider };
+
 import SubheadingExamples from "../src/subheading/examples.data";
 export { SubheadingExamples };
 

@@ -17,5 +17,6 @@ export * from "./pivot";
 export * from "./progress";
 export * from "./select";
 export * from "./select-option";
+export * from "./slider";
 export * from "./subheading";
 export * from "./text-action";

@@ -5,36 +5,46 @@ import Foundation, { HandledProps } from "@microsoft/fast-components-foundation-
 import { KeyCodes } from "@microsoft/fast-web-utilities";
 import {
     SliderHandledProps,
+    SliderMode,
     SliderOrientation,
     SliderProps,
+    SliderRange,
     SliderUnhandledProps,
 } from "./slider.props";
-import {
-    ManagedClasses,
-    SliderClassNameContract,
-} from "@microsoft/fast-components-class-name-contracts-base";
-import { debug } from "util";
+import { SliderClassNameContract } from "@microsoft/fast-components-class-name-contracts-base";
+import { DisplayNamePrefix } from "../utilities";
+import { SliderContext } from "./slider-context";
+import SliderTrackItem, {
+    SliderTrackItemAnchor,
+    SliderTrackItemManagedClasses,
+} from "../slider-track-item";
+
+export enum SliderThumb {
+    upperThumb = "upperThumb",
+    lowerThumb = "lowerThumb",
+}
 
 export interface SliderState {
-    dragValue: number;
-    dragValueAsPercent: number;
-    value: number;
-    valueAsPercent: number;
+    upperValue: number;
+    lowerValue: number;
     isDragging: boolean;
+    dragValue: number;
+    activeThumb: SliderThumb;
     isIncrementing: boolean;
 }
 
 class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, SliderState> {
-    public static displayName: string = "Slider";
+    public static displayName: string = `${DisplayNamePrefix}Slider`;
 
     public static defaultProps: Partial<SliderProps> = {
         disabled: false,
         orientation: SliderOrientation.horizontal,
-        initialValue: 0,
-        min: 0,
-        max: 100,
+        mode: SliderMode.singleValue,
+        range: {
+            minValue: 0,
+            maxValue: 100,
+        },
         step: 1,
-        pageStep: 10,
     };
 
     private static baseIncrementDelay: number = 250;
@@ -45,12 +55,13 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
         disabled: void 0,
         managedClasses: void 0,
         orientation: void 0,
+        mode: void 0,
         initialValue: void 0,
-        min: void 0,
-        max: void 0,
+        range: void 0,
         pageStep: void 0,
         step: void 0,
         value: void 0,
+        constrainedRange: void 0,
         onValueChange: void 0,
         name: void 0,
         form: void 0,
@@ -78,30 +89,93 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
     constructor(props: SliderProps) {
         super(props);
 
-        const value: number =
-            this.props.value === undefined ? this.props.initialValue : this.props.value;
+        let initialLowerValue: number = 0;
+        let initialUpperValue: number = 0;
+
+        if (this.props.value !== undefined) {
+            initialLowerValue = this.valueAsRange(this.props.value).minValue;
+            initialUpperValue = this.valueAsRange(this.props.value).maxValue;
+        } else if (this.props.initialValue !== undefined) {
+            initialLowerValue = this.valueAsRange(this.props.initialValue).minValue;
+            initialUpperValue = this.valueAsRange(this.props.initialValue).maxValue;
+        } else {
+            switch (this.props.mode) {
+                case SliderMode.singleValue:
+                    initialLowerValue = this.contstrainToStep(
+                        this.percentAsValue(50),
+                        this.props.step
+                    );
+                    initialUpperValue = this.contstrainToStep(
+                        this.percentAsValue(50),
+                        this.props.step
+                    );
+                    break;
+                case SliderMode.adjustBoth:
+                    initialLowerValue = this.contstrainToStep(
+                        this.percentAsValue(40),
+                        this.props.step
+                    );
+                    initialUpperValue = this.contstrainToStep(
+                        this.percentAsValue(60),
+                        this.props.step
+                    );
+                    break;
+                case SliderMode.adustLowerValue:
+                    initialLowerValue = this.contstrainToStep(
+                        this.percentAsValue(50),
+                        this.props.step
+                    );
+                    initialUpperValue = this.props.range.maxValue;
+                    break;
+                case SliderMode.adustUpperValue:
+                    initialLowerValue = this.props.range.minValue;
+                    initialUpperValue = this.contstrainToStep(
+                        this.percentAsValue(50),
+                        this.props.step
+                    );
+                    break;
+            }
+        }
 
         this.state = {
             dragValue: -1,
-            dragValueAsPercent: 0,
-            value,
-            valueAsPercent:
-                ((value - this.props.min) / (this.props.max - this.props.min)) * 100,
+            upperValue: initialUpperValue,
+            lowerValue: initialLowerValue,
+            activeThumb: null,
             isDragging: false,
             isIncrementing: false,
         };
     }
 
-    // public componentDidMount(): void {
-    // }
-
+    /**
+     * React lifecycle methods
+     */
     public componentWillUnmount(): void {
-        this.stopDragging();
-        this.stopIncrementing();
+        this.suspendActiveOperations();
     }
 
-    // public componentDidUpdate(prevProps: SliderProps): void {
-    // }
+    public componentDidUpdate(prevProps: SliderProps): void {
+        if (prevProps.disabled !== this.props.disabled && this.props.disabled) {
+            this.suspendActiveOperations();
+        }
+
+        if (
+            prevProps.value !== this.props.value ||
+            prevProps.constrainedRange !== this.props.constrainedRange ||
+            prevProps.step !== this.props.step
+        ) {
+            this.suspendActiveOperations();
+            this.updateValues(this.state.lowerValue, this.state.upperValue);
+        }
+
+        if (prevProps.mode !== this.props.mode) {
+            this.suspendActiveOperations();
+
+            if (this.props.mode === SliderMode.singleValue) {
+                this.updateValues(this.state.upperValue, this.state.upperValue);
+            }
+        }
+    }
 
     /**
      * Renders the component
@@ -112,50 +186,58 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
                 {...this.unhandledProps()}
                 ref={this.rootElement}
                 className={this.generateClassNames()}
-                style={{ height: "80px", background: "white" }}
             >
-                <div
-                    className={get(this.props.managedClasses, "slider_layoutPanel", "")}
-                    style={{
-                        position: "relative",
-                        background: "blue",
-                        height: "100%",
-                        width: "100%",
+                <SliderContext.Provider
+                    value={{
+                        sliderOrientation: this.props.orientation,
+                        sliderMode: this.props.mode,
+                        sliderUpperValue: this.state.upperValue,
+                        sliderLowerValue: this.state.lowerValue,
+                        sliderConstrainedRange: this.props.constrainedRange,
+                        sliderActiveThumb: this.state.activeThumb,
+                        sliderIsDragging: this.state.isDragging,
+                        sliderIsIncrementing: this.state.isIncrementing,
+                        sliderValueAsPercent: this.valueAsPercent,
                     }}
-                    ref={this.layoutElement}
                 >
                     <div
-                        className={get(this.props.managedClasses, "slider_barBack", "")}
-                        onMouseDown={this.handleTrackMouseDown}
+                        className={get(
+                            this.props.managedClasses,
+                            "slider_layoutPanel",
+                            ""
+                        )}
                         style={{
-                            position: "absolute",
-                            top: "0",
-                            left: "0",
-                            height: "20px",
-                            background: "yellow",
-                            width: "100%",
+                            position: "relative",
                         }}
-                    />
-                    <div
-                        className={get(this.props.managedClasses, "slider_barFront", "")}
-                        onMouseDown={this.handleTrackMouseDown}
-                        style={{
-                            position: "absolute",
-                            top: "0",
-                            left: "0",
-                            height: "10px",
-                            background: "green",
-                            width: `${
-                                this.state.isDragging
-                                    ? this.state.dragValueAsPercent
-                                    : this.state.valueAsPercent
-                            }%`,
-                        }}
-                    />
-                    {this.props.children}
-                    {this.renderThumb()}
-                </div>
-                {this.renderHiddenInputElement()}
+                        ref={this.layoutElement}
+                    >
+                        <div
+                            className={get(
+                                this.props.managedClasses,
+                                "slider_barBack",
+                                ""
+                            )}
+                            onMouseDown={this.handleTrackMouseDown}
+                            style={{
+                                position: "absolute",
+                            }}
+                        />
+                        <SliderTrackItem
+                            {...this.getFrontBarManagedClasses()}
+                            trackerUpperValuePositionBinding={
+                                SliderTrackItemAnchor.selectedRangeMax
+                            }
+                            trackerLowerValuePositionBinding={
+                                SliderTrackItemAnchor.selectedRangeMin
+                            }
+                            onMouseDown={this.handleTrackMouseDown}
+                        />
+                        {this.props.children}
+                        {this.renderThumb(SliderThumb.upperThumb)}
+                        {this.renderThumb(SliderThumb.lowerThumb)}
+                    </div>
+                    {this.renderHiddenInputElement()}
+                </SliderContext.Provider>
             </div>
         );
     }
@@ -174,56 +256,140 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
             )}`;
         }
 
+        if (this.props.orientation === SliderOrientation.horizontal) {
+            classNames = `${classNames} ${get(
+                this.props,
+                "managedClasses.slider__orientationHorizontal",
+                ""
+            )}`;
+        } else {
+            classNames = `${classNames} ${get(
+                this.props,
+                "managedClasses.slider__orientationVertical",
+                ""
+            )}`;
+        }
+
         return super.generateClassNames(classNames);
     }
 
-    private renderThumb(): React.ReactNode {
+    /**
+     *  Maps the front bar managed classes to the appropriate slider managed classes
+     */
+    private getFrontBarManagedClasses = (): SliderTrackItemManagedClasses => {
+        return {
+            managedClasses: {
+                sliderTrackItem: get(this.props, "managedClasses.slider_barFront", ""),
+                sliderTrackItem__orientationHorizontal: get(
+                    this.props,
+                    "managedClasses.slider_barFront__orientationHorizontal",
+                    ""
+                ),
+                sliderTrackItem__orientationVertical: get(
+                    this.props,
+                    "managedClasses.slider_barFront__orientationVertical",
+                    ""
+                ),
+            },
+        };
+    };
+
+    /**
+     *  Maps the default thumb managed classes to the appropriate slider managed classes
+     */
+    private getThumbManagedClasses = (): SliderTrackItemManagedClasses => {
+        return {
+            managedClasses: {
+                sliderTrackItem: get(this.props, "managedClasses.slider_thumb", ""),
+                sliderTrackItem__orientationHorizontal: get(
+                    this.props,
+                    "managedClasses.slider_thumb__orientationHorizontal",
+                    ""
+                ),
+                sliderTrackItem__orientationVertical: get(
+                    this.props,
+                    "managedClasses.slider_thumb__orientationVertical",
+                    ""
+                ),
+            },
+        };
+    };
+
+    /**
+     *  Renders the appropriate thumb
+     */
+    private renderThumb(thumb: SliderThumb): React.ReactNode {
+        if (
+            (this.props.mode === SliderMode.adustLowerValue &&
+                thumb === SliderThumb.upperThumb) ||
+            (this.props.mode === SliderMode.adustUpperValue &&
+                thumb === SliderThumb.lowerThumb) ||
+            (this.props.mode === SliderMode.singleValue &&
+                thumb === SliderThumb.lowerThumb)
+        ) {
+            return;
+        }
+
         if (typeof this.props.thumb === "function") {
             return this.props.thumb(
                 this.props,
                 this.state,
-                this.handleThumbMouseDown,
-                this.handleThumbKeydown
+                thumb === SliderThumb.upperThumb
+                    ? this.handleUpperThumbMouseDown
+                    : this.handleLowerThumbMouseDown,
+                thumb === SliderThumb.upperThumb
+                    ? this.handleUpperThumbKeyDown
+                    : this.handleLowerThumbKeyDown,
+                thumb
             );
         } else {
             return this.renderDefaultThumb(
                 this.props,
                 this.state,
-                this.handleThumbMouseDown,
-                this.handleThumbKeydown
+                thumb === SliderThumb.upperThumb
+                    ? this.handleUpperThumbMouseDown
+                    : this.handleLowerThumbMouseDown,
+                thumb === SliderThumb.upperThumb
+                    ? this.handleUpperThumbKeyDown
+                    : this.handleLowerThumbKeyDown,
+                thumb
             );
         }
     }
 
+    /**
+     *  Renders the default thumb
+     */
     private renderDefaultThumb(
         props: SliderProps,
         state: SliderState,
         mouseDownCallback: (event: React.MouseEvent) => void,
-        keyDownCallback: (event: React.KeyboardEvent) => void
+        keyDownCallback: (event: React.KeyboardEvent) => void,
+        thumb: SliderThumb
     ): React.ReactNode {
         return (
-            <div
-                className={get(this.props.managedClasses, "slider_thumb", "")}
+            <SliderTrackItem
+                {...this.getThumbManagedClasses()}
+                trackerLowerValuePositionBinding={
+                    thumb === SliderThumb.lowerThumb
+                        ? SliderTrackItemAnchor.selectedRangeMin
+                        : undefined
+                }
+                trackerUpperValuePositionBinding={
+                    thumb === SliderThumb.upperThumb
+                        ? SliderTrackItemAnchor.selectedRangeMax
+                        : undefined
+                }
                 draggable={false}
-                tabIndex={0}
+                tabIndex={thumb === SliderThumb.lowerThumb ? 0 : 1}
                 onKeyDown={keyDownCallback}
                 onMouseDown={mouseDownCallback}
-                aria-valuemin={props.min}
-                aria-valuemax={props.max}
-                aria-valuenow={state.value}
+                aria-valuemin={props.range.minValue}
+                aria-valuemax={props.range.maxValue}
+                aria-valuenow={
+                    thumb === SliderThumb.lowerThumb ? state.lowerValue : state.upperValue
+                }
                 aria-labelledby={props.labelledBy || null}
-                style={{
-                    position: "absolute",
-                    top: "0",
-                    left: "0",
-                    width: "20px",
-                    height: "20px",
-                    background: "red",
-                    marginLeft: `${
-                        state.isDragging ? state.dragValueAsPercent : state.valueAsPercent
-                    }%`,
-                    transform: "translateX(-10px)",
-                }}
             />
         );
     }
@@ -233,13 +399,30 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
      * form hosting this component
      */
     private renderHiddenInputElement(): React.ReactNode {
+        let formattedValue: string = "";
+
+        switch (this.props.mode) {
+            case SliderMode.adjustBoth:
+                formattedValue =
+                    "[" + this.state.lowerValue + "," + this.state.upperValue + "]";
+                break;
+
+            case SliderMode.adustUpperValue:
+            case SliderMode.singleValue:
+                formattedValue = `${this.state.upperValue}`;
+                break;
+
+            case SliderMode.adustLowerValue:
+                formattedValue = `${this.state.lowerValue}`;
+                break;
+        }
+
         return (
             <input
                 type="range"
-                required={this.props.required || null}
                 name={this.props.name || null}
                 form={this.props.form || null}
-                value={this.state.value}
+                value={formattedValue}
                 disabled={this.props.disabled || null}
                 style={{
                     display: "none",
@@ -249,26 +432,15 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
     }
 
     /**
-     * Handles thumb clicks
-     */
-    private handleThumbMouseDown = (e: React.MouseEvent): void => {
-        if (this.props.disabled || e.defaultPrevented) {
-            return;
-        }
-        e.preventDefault();
-        window.addEventListener("mouseup", this.handleWindowMouseUp);
-        window.addEventListener("mousemove", this.handleMouseMove);
-        this.updateSliderDimensions();
-        this.setState({
-            isDragging: true,
-        });
-    };
-
-    /**
      * Handles track clicks
      */
     private handleTrackMouseDown = (event: React.MouseEvent): void => {
-        if (this.props.disabled || event.defaultPrevented) {
+        if (
+            this.props.disabled ||
+            event.defaultPrevented ||
+            this.state.isDragging ||
+            this.state.isIncrementing
+        ) {
             return;
         }
         event.preventDefault();
@@ -278,52 +450,64 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
                 ? event.pageX
                 : event.pageY;
         const newValue: number =
-            (this.props.max - this.props.min) *
+            (this.props.range.maxValue - this.props.range.minValue) *
                 this.convertPixelToPercent(pixelCoordinate) +
-            this.props.min;
-        this.updateValue(newValue);
-    };
+            this.props.range.minValue;
 
-    private updateSliderDimensions = (): void => {
-        this.rangeInPixels = SliderOrientation.horizontal
-            ? this.layoutElement.current.clientWidth
-            : this.layoutElement.current.clientHeight;
-        this.barMinPixel =
-            this.props.orientation === SliderOrientation.horizontal
-                ? this.layoutElement.current.getBoundingClientRect().left
-                : this.layoutElement.current.getBoundingClientRect().top;
+        switch (this.props.mode) {
+            case SliderMode.singleValue:
+                this.updateValues(newValue, newValue);
+                break;
+
+            case SliderMode.adjustBoth:
+                this.handleMultiThumbTrackClick(newValue);
+                break;
+
+            case SliderMode.adustLowerValue:
+                this.updateValues(newValue, null);
+                break;
+
+            case SliderMode.adustUpperValue:
+                this.updateValues(null, newValue);
+                break;
+        }
     };
 
     /**
-     * Handles key events
+     *  Handles track clicks when there are multiple thumbs
      */
-    private handleThumbKeydown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
-        if (this.props.disabled || e.defaultPrevented) {
-            return;
-        }
-
-        switch (e.keyCode) {
-            case KeyCodes.arrowDown:
-            case KeyCodes.arrowRight:
-                this.startIncrementing(1, false);
-                break;
-            case KeyCodes.arrowUp:
-            case KeyCodes.arrowLeft:
-                this.startIncrementing(-1, false);
-                break;
-            case KeyCodes.pageDown:
-                if (this.props.pageStep !== undefined) {
-                    this.startIncrementing(1, true);
-                }
-                break;
-            case KeyCodes.pageUp:
-                if (this.props.pageStep !== undefined) {
-                    this.startIncrementing(-1, true);
-                }
-                break;
+    private handleMultiThumbTrackClick = (value: number): void => {
+        if (value <= this.state.lowerValue) {
+            this.updateValues(value, null);
+        } else if (value >= this.state.upperValue) {
+            this.updateValues(null, value);
+        } else {
+            // between values move the closest thumb to the click
+            if (value - this.state.lowerValue < this.state.upperValue - value) {
+                this.updateValues(value, null);
+            } else {
+                this.updateValues(null, value);
+            }
         }
     };
 
+    /**
+     * Measures the slider dimensions and stores them
+     */
+    private updateSliderDimensions = (): void => {
+        this.rangeInPixels =
+            this.props.orientation === SliderOrientation.horizontal
+                ? this.layoutElement.current.clientWidth
+                : this.layoutElement.current.clientHeight;
+        this.barMinPixel =
+            this.props.orientation === SliderOrientation.horizontal
+                ? this.layoutElement.current.getBoundingClientRect().left
+                : this.layoutElement.current.getBoundingClientRect().bottom;
+    };
+
+    /**
+     * Kicks off incrementing value
+     */
     private startIncrementing = (
         incrementDirection: number,
         usePageStep: boolean
@@ -346,13 +530,26 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
         }, this.lastIncrementDelay);
     };
 
+    /**
+     * Increments the value by one step (or pageStep)
+     */
     private incrementValue = (): void => {
         const step: number = this.usePageStep ? this.props.pageStep : this.props.step;
-        this.updateValue(this.state.value + step * this.incrementDirection);
+        if (this.state.activeThumb === SliderThumb.upperThumb) {
+            this.updateValues(
+                null,
+                this.state.upperValue + step * this.incrementDirection
+            );
+        } else {
+            this.updateValues(
+                this.state.lowerValue + step * this.incrementDirection,
+                null
+            );
+        }
     };
 
     /**
-     *
+     *  Increment timer tick
      */
     private incrementTimerExpired = (): void => {
         clearTimeout(this.incrementTimer);
@@ -366,6 +563,9 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
         }, this.lastIncrementDelay);
     };
 
+    /**
+     *  Stop incrementing
+     */
     private stopIncrementing = (): void => {
         if (!this.state.isIncrementing) {
             return;
@@ -377,8 +577,17 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
         clearTimeout(this.incrementTimer);
     };
 
+    /**
+     * Converts a pixel coordinate on the track to a percent of the track's range
+     */
     private convertPixelToPercent = (pixelPos: number): number => {
-        let pct: number = (pixelPos - this.barMinPixel) / this.rangeInPixels;
+        let pct: number = 0;
+
+        if (this.props.orientation === SliderOrientation.horizontal) {
+            pct = (pixelPos - this.barMinPixel) / this.rangeInPixels;
+        } else {
+            pct = (this.barMinPixel - pixelPos) / this.rangeInPixels;
+        }
 
         if (pct < 0) {
             pct = 0;
@@ -390,94 +599,298 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
     };
 
     /**
-     *
+     * Handles thumb key events
+     */
+    private handleUpperThumbKeyDown = (
+        event: React.KeyboardEvent<HTMLDivElement>
+    ): void => {
+        this.handleThumbKeydown(event, SliderThumb.upperThumb);
+    };
+
+    private handleLowerThumbKeyDown = (
+        event: React.KeyboardEvent<HTMLDivElement>
+    ): void => {
+        this.handleThumbKeydown(event, SliderThumb.lowerThumb);
+    };
+
+    private handleThumbKeydown = (
+        event: React.KeyboardEvent<HTMLDivElement>,
+        thumb: SliderThumb
+    ): void => {
+        if (
+            this.props.disabled ||
+            event.defaultPrevented ||
+            this.state.isDragging ||
+            this.state.isIncrementing
+        ) {
+            return;
+        }
+
+        this.setState({
+            activeThumb: thumb,
+        });
+
+        switch (event.keyCode) {
+            case KeyCodes.arrowDown:
+            case KeyCodes.arrowRight:
+                this.startIncrementing(1, false);
+                event.preventDefault();
+                break;
+            case KeyCodes.arrowUp:
+            case KeyCodes.arrowLeft:
+                this.startIncrementing(-1, false);
+                event.preventDefault();
+                break;
+            case KeyCodes.pageDown:
+                if (this.props.pageStep !== undefined) {
+                    this.startIncrementing(1, true);
+                }
+                event.preventDefault();
+                break;
+            case KeyCodes.pageUp:
+                if (this.props.pageStep !== undefined) {
+                    this.startIncrementing(-1, true);
+                }
+                event.preventDefault();
+                break;
+        }
+    };
+
+    /**
+     * Handles thumb clicks
+     */
+    private handleUpperThumbMouseDown = (e: React.MouseEvent): void => {
+        this.handleThumbMouseDown(e, SliderThumb.upperThumb);
+    };
+
+    private handleLowerThumbMouseDown = (e: React.MouseEvent): void => {
+        this.handleThumbMouseDown(e, SliderThumb.lowerThumb);
+    };
+
+    private handleThumbMouseDown = (e: React.MouseEvent, thumb: SliderThumb): void => {
+        if (
+            this.props.disabled ||
+            e.defaultPrevented ||
+            this.state.isDragging ||
+            this.state.isIncrementing
+        ) {
+            return;
+        }
+
+        e.preventDefault();
+        window.addEventListener("mouseup", this.handleWindowMouseUp);
+        window.addEventListener("mousemove", this.handleMouseMove);
+        this.setState({
+            isDragging: true,
+            activeThumb: thumb,
+        });
+    };
+
+    /**
+     *  Handle mouse moves during a thumb drag operation
      */
     private handleMouseMove = (event: MouseEvent): void => {
+        if (this.props.disabled || event.defaultPrevented) {
+            return;
+        }
+        this.updateSliderDimensions();
         const pixelCoordinate: number =
             this.props.orientation === SliderOrientation.horizontal
                 ? event.pageX
                 : event.pageY;
         const dragValue: number =
-            (this.props.max - this.props.min) *
+            (this.props.range.maxValue - this.props.range.minValue) *
                 this.convertPixelToPercent(pixelCoordinate) +
-            this.props.min;
-        this.updateValue(dragValue, dragValue);
-    };
-
-    private updateValue = (value: number, dragValue?: number): void => {
-        let newValue: number = value;
-
-        if (this.props.value !== undefined) {
-            newValue = this.props.value;
-        } else {
-            newValue = this.constrainToRange(
-                this.contstrainToStep(value, this.props.step),
-                this.props.min,
-                this.props.max
-            );
-        }
-
-        let newDragValue: number = newValue;
-
-        if (dragValue !== undefined) {
-            newDragValue = this.constrainToRange(
-                dragValue,
-                this.props.min,
-                this.props.max
-            );
-        }
-
-        if (
-            typeof this.props.onValueChange === "function" &&
-            this.state.value !== newValue
-        ) {
-            this.props.onValueChange(newValue);
-        }
-
-        this.setState({
-            dragValue: newDragValue,
-            dragValueAsPercent: this.valueAsPercent(newDragValue),
-            value: newValue,
-            valueAsPercent: this.valueAsPercent(newValue),
-        });
-    };
-
-    private constrainToRange = (value: number, min: number, max: number): number => {
-        let newValue: number = value;
-        if (newValue > max) {
-            newValue = max;
-        } else if (newValue < min) {
-            newValue = min;
-        }
-        return newValue;
-    };
-
-    private contstrainToStep = (value: number, step: number): number => {
-        if (step === 0) {
-            return value;
-        }
-
-        return Math.floor(value / step) * step;
-    };
-
-    private valueAsPercent = (value: number): number => {
-        return ((value - this.props.min) / (this.props.max - this.props.min)) * 100;
+            this.props.range.minValue;
+        this.updateDragValue(dragValue);
     };
 
     /**
-     *
+     *  Updates the current drag value
+     */
+    private updateDragValue = (dragValue: number): void => {
+        const constrainedRange: SliderRange = this.getConstrainedRange(true);
+
+        const newDragValue: number = this.constrainToRange(dragValue, constrainedRange);
+
+        this.setState({
+            dragValue: newDragValue,
+        });
+
+        if (this.state.activeThumb === SliderThumb.lowerThumb) {
+            this.updateValues(newDragValue, null);
+        } else {
+            this.updateValues(null, newDragValue);
+        }
+    };
+
+    /**
+     *  Gets the range of values the active thumb is actually allowed to traverse
+     */
+    private getConstrainedRange = (
+        constrainToOppositeEndOfRange: boolean
+    ): SliderRange => {
+        let rangeMin: number = this.props.range.minValue;
+        let rangeMax: number = this.props.range.maxValue;
+
+        if (this.props.constrainedRange !== undefined) {
+            rangeMin =
+                this.props.constrainedRange.minValue > rangeMin
+                    ? this.props.constrainedRange.minValue
+                    : rangeMin;
+            rangeMax =
+                this.props.constrainedRange.maxValue < rangeMax
+                    ? this.props.constrainedRange.maxValue
+                    : rangeMin;
+        }
+
+        if (this.props.mode !== SliderMode.singleValue && constrainToOppositeEndOfRange) {
+            if (this.state.activeThumb === SliderThumb.lowerThumb) {
+                rangeMax = this.state.upperValue;
+            } else {
+                rangeMin = this.state.lowerValue;
+            }
+        }
+
+        return {
+            minValue: rangeMin,
+            maxValue: rangeMax,
+        };
+    };
+
+    /**
+     *  Converts a single number value to a SliderRange based on current mode
+     */
+    private valueAsRange = (value: number | SliderRange): SliderRange => {
+        if (typeof value === "number") {
+            switch (this.props.mode) {
+                case SliderMode.adjustBoth:
+                case SliderMode.singleValue:
+                    return {
+                        minValue: value,
+                        maxValue: value,
+                    };
+                case SliderMode.adustLowerValue:
+                    return {
+                        minValue: value,
+                        maxValue: this.props.range.maxValue,
+                    };
+                case SliderMode.adustUpperValue:
+                    return {
+                        minValue: this.props.range.minValue,
+                        maxValue: value,
+                    };
+            }
+        } else if (typeof value === "object") {
+            return value;
+        }
+    };
+
+    /**
+     *  Apply value changes, only place this should happen outside of constructor
+     */
+    private updateValues = (lowerValue: number, upperValue: number): void => {
+        let newLowerValue: number = this.state.lowerValue;
+        let newUpperValue: number = this.state.upperValue;
+
+        if (this.props.value !== undefined) {
+            newLowerValue = this.valueAsRange(this.props.value).minValue;
+            newUpperValue = this.valueAsRange(this.props.value).maxValue;
+        } else {
+            if (lowerValue !== null) {
+                newLowerValue = this.constrainToRange(
+                    this.contstrainToStep(lowerValue, this.props.step),
+                    {
+                        minValue: this.props.range.minValue,
+                        maxValue:
+                            this.props.mode === SliderMode.adjustBoth
+                                ? this.state.upperValue
+                                : this.props.range.maxValue,
+                    }
+                );
+            }
+
+            if (upperValue !== null) {
+                newUpperValue = this.constrainToRange(
+                    this.contstrainToStep(upperValue, this.props.step),
+                    {
+                        minValue:
+                            this.props.mode === SliderMode.adjustBoth
+                                ? this.state.lowerValue
+                                : this.props.range.minValue,
+                        maxValue: this.props.range.maxValue,
+                    }
+                );
+            }
+        }
+
+        if (
+            this.state.upperValue !== newUpperValue ||
+            this.state.lowerValue !== newLowerValue
+        ) {
+            this.setState({
+                lowerValue:
+                    this.props.mode === SliderMode.singleValue
+                        ? newUpperValue
+                        : newLowerValue,
+                upperValue: newUpperValue,
+            });
+
+            this.invokeValueChange(newLowerValue, newUpperValue);
+        }
+    };
+
+    /**
+     *  Invokes the value change event and formats params based on current mode
+     */
+    private invokeValueChange = (lowerValue: number, upperValue: number): void => {
+        if (typeof this.props.onValueChange === "function") {
+            switch (this.props.mode) {
+                case SliderMode.adjustBoth:
+                    this.props.onValueChange({
+                        minValue: lowerValue,
+                        maxValue: upperValue,
+                    });
+                    break;
+
+                case SliderMode.adustUpperValue:
+                case SliderMode.singleValue:
+                    this.props.onValueChange(upperValue);
+                    break;
+
+                case SliderMode.adustLowerValue:
+                    this.props.onValueChange(lowerValue);
+                    break;
+            }
+        }
+    };
+
+    /**
+     * Handle a window mouse up during a drag operation
      */
     private handleWindowMouseUp = (event: MouseEvent): void => {
         this.stopDragging();
     };
 
     /**
-     *
+     *  Handle window key up during an incrementing operation
      */
-    private handleWindowKeyUp = (event: MouseEvent): void => {
-        this.stopIncrementing();
+    private handleWindowKeyUp = (event: KeyboardEvent): void => {
+        switch (event.keyCode) {
+            case KeyCodes.arrowDown:
+            case KeyCodes.arrowRight:
+            case KeyCodes.arrowUp:
+            case KeyCodes.arrowLeft:
+            case KeyCodes.pageDown:
+            case KeyCodes.pageUp:
+                this.stopIncrementing();
+                break;
+        }
     };
 
+    /**
+     *  Ends a thumb drag operation
+     */
     private stopDragging = (): void => {
         if (!this.state.isDragging) {
             return;
@@ -487,6 +900,59 @@ class Slider extends Foundation<SliderHandledProps, SliderUnhandledProps, Slider
         this.setState({
             isDragging: false,
         });
+    };
+
+    /**
+     *  Ends active drag/increment operations
+     */
+    private suspendActiveOperations = (): void => {
+        this.stopDragging();
+        this.stopIncrementing();
+    };
+
+    /**
+     * Ensures a value falls within the provided range
+     */
+    private constrainToRange = (value: number, range: SliderRange): number => {
+        let newValue: number = value;
+        if (newValue > range.maxValue) {
+            newValue = range.maxValue;
+        } else if (newValue < range.minValue) {
+            newValue = range.minValue;
+        }
+        return newValue;
+    };
+
+    /**
+     * Ensures a value is an even multiple of the slider step increment
+     */
+    private contstrainToStep = (value: number, step: number): number => {
+        if (step === 0) {
+            return value;
+        }
+
+        return Math.floor(value / step) * step;
+    };
+
+    /**
+     * Converts value to a percent of slider range
+     */
+    private valueAsPercent = (value: number): number => {
+        return (
+            ((value - this.props.range.minValue) /
+                (this.props.range.maxValue - this.props.range.minValue)) *
+            100
+        );
+    };
+
+    /**
+     *  Converts a percent value to the equivalent value on the bar range
+     */
+    private percentAsValue = (value: number): number => {
+        return (
+            ((this.props.range.maxValue - this.props.range.minValue) / 100) * value +
+            this.props.range.minValue
+        );
     };
 }
 
